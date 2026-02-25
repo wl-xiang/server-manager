@@ -1,0 +1,260 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PID_FILE="${SCRIPT_DIR}/server.pid"
+LOG_DIR="${SCRIPT_DIR}/logs"
+LOG_FILE=""
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+start_func() {
+    python3 "${SCRIPT_DIR}/test_server.py" --message "TestServer" --interval 2 >> "${LOG_FILE}" 2>&1
+}
+
+get_log_file() {
+    local year_month
+    year_month=$(date +%Y%m)
+    LOG_FILE="${LOG_DIR}/server_${year_month}.log"
+}
+
+create_log_dir() {
+    if [ ! -d "${LOG_DIR}" ]; then
+        mkdir -p "${LOG_DIR}"
+    fi
+}
+
+check_pid() {
+    if [ ! -f "${PID_FILE}" ]; then
+        return 1
+    fi
+    
+    local pid
+    pid=$(cat "${PID_FILE}")
+    
+    if [ -z "${pid}" ]; then
+        rm -f "${PID_FILE}"
+        return 1
+    fi
+    
+    if kill -0 "${pid}" 2>/dev/null; then
+        return 0
+    else
+        rm -f "${PID_FILE}"
+        return 1
+    fi
+}
+
+get_pid() {
+    if [ -f "${PID_FILE}" ]; then
+        cat "${PID_FILE}"
+    fi
+}
+
+do_start() {
+    if check_pid; then
+        local pid
+        pid=$(get_pid)
+        echo -e "${RED}Error: Server is already running with PID ${pid}${NC}"
+        exit 1
+    fi
+    
+    create_log_dir
+    get_log_file
+    
+    if [ -f "${LOG_FILE}" ]; then
+        > "${LOG_FILE}"
+    fi
+    
+    if [ -z "$(type -t start_func)" ] || [ "$(type -t start_func)" != "function" ]; then
+        echo -e "${RED}Error: start_func function is not defined${NC}"
+        exit 1
+    fi
+    
+    start_func &
+    local child_pid=$!
+    
+    sleep 0.5
+    
+    if ! kill -0 "${child_pid}" 2>/dev/null; then
+        echo -e "${RED}Error: Failed to start server${NC}"
+        exit 1
+    fi
+    
+    echo "${child_pid}" > "${PID_FILE}"
+    
+    echo -e "${GREEN}Server started successfully${NC} with PID ${child_pid}"
+    echo "Log file: ${LOG_FILE}"
+}
+
+do_stop() {
+    if ! check_pid; then
+        echo "Server is not running"
+        rm -f "${PID_FILE}" 2>/dev/null
+        exit 0
+    fi
+    
+    local pid
+    pid=$(get_pid)
+    
+    echo "Stopping server (PID: ${pid})..."
+    kill -TERM "${pid}" 2>/dev/null
+    
+    local count=0
+    local max_wait=30
+    
+    while kill -0 "${pid}" 2>/dev/null && [ ${count} -lt ${max_wait} ]; do
+        sleep 1
+        count=$((count + 1))
+        echo -n "."
+    done
+    
+    echo ""
+    
+    if kill -0 "${pid}" 2>/dev/null; then
+        echo "Warning: Server did not stop gracefully, still running"
+        exit 1
+    fi
+    
+    rm -f "${PID_FILE}"
+    echo -e "${GREEN}Server stopped successfully${NC}"
+}
+
+do_shutdown() {
+    if ! check_pid; then
+        echo "Server is not running"
+        rm -f "${PID_FILE}" 2>/dev/null
+        exit 0
+    fi
+    
+    local pid
+    pid=$(get_pid)
+    
+    echo "Forcefully shutting down server (PID: ${pid})..."
+    kill -KILL "${pid}" 2>/dev/null
+    sleep 1
+    
+    rm -f "${PID_FILE}"
+    echo -e "${GREEN}Server forcefully stopped${NC}"
+}
+
+do_status() {
+    if check_pid; then
+        local pid
+        pid=$(get_pid)
+        echo -e "Server is ${GREEN}running${NC} (PID: ${pid})"
+        exit 0
+    else
+        echo -e "Server is ${RED}stopped${NC}"
+        exit 1
+    fi
+}
+
+do_log() {
+    get_log_file
+    create_log_dir
+    
+    if [ ! -f "${LOG_FILE}" ]; then
+        echo "Log file does not exist: ${LOG_FILE}"
+        exit 1
+    fi
+    
+    local lines=""
+    local follow=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n)
+                lines="-n $2"
+                shift 2
+                ;;
+            -f)
+                follow="-f"
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    
+    tail ${lines} ${follow} "${LOG_FILE}"
+}
+
+do_restart() {
+    echo "Restarting server..."
+    do_stop
+    sleep 1
+    do_start
+}
+
+do_clean() {
+    if check_pid; then
+        echo -e "${RED}Error: Server is running (PID: $(get_pid)). Stop server before cleaning logs.${NC}"
+        exit 1
+    fi
+    
+    create_log_dir
+    
+    if [ ! -d "${LOG_DIR}" ]; then
+        echo "Log directory does not exist"
+        exit 0
+    fi
+    
+    local count
+    count=$(find "${LOG_DIR}" -maxdepth 1 -name "server_*.log" -type f | wc -l)
+    
+    if [ ${count} -eq 0 ]; then
+        echo "No log files to clean"
+        exit 0
+    fi
+    
+    rm -f "${LOG_DIR}"/server_*.log
+    echo "Cleaned ${count} log file(s)"
+}
+
+show_usage() {
+    echo "Usage: $0 {start|stop|shutdown|status|log|restart|clean}"
+    echo ""
+    echo "Commands:"
+    echo "  start    - Start the server in background"
+    echo "  stop     - Gracefully stop the server (SIGTERM)"
+    echo "  shutdown - Forcefully stop the server (SIGKILL)"
+    echo "  status   - Show server status"
+    echo "  log      - View server log (supports -n NUM and -f)"
+    echo "  restart  - Restart the server"
+    echo "  clean    - Clean all log files"
+    echo ""
+    echo "Note: Define start_func() function before calling this script"
+}
+
+case "$1" in
+    start)
+        do_start
+        ;;
+    stop)
+        do_stop
+        ;;
+    shutdown)
+        do_shutdown
+        ;;
+    status)
+        do_status
+        ;;
+    log)
+        shift
+        do_log "$@"
+        ;;
+    restart)
+        do_restart
+        ;;
+    clean)
+        do_clean
+        ;;
+    *)
+        show_usage
+        exit 1
+        ;;
+esac
