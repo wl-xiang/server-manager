@@ -4,6 +4,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PID_FILE="${SCRIPT_DIR}/server.pid"
 LOG_DIR="${SCRIPT_DIR}/logs"
 LOG_FILE=""
+START_COMMAND="${START_COMMAND:-}"
+BEFORE_COMMAND="${BEFORE_COMMAND:-}"
+AFTER_COMMAND="${AFTER_COMMAND:-}"
+LOG_MAX_BACKUPS="${LOG_MAX_BACKUPS:-2}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -11,13 +15,26 @@ YELLOW='\033[0;33m'
 NC='\033[0m'
 
 start_func() {
-    python3 "${SCRIPT_DIR}/test_server.py" --message "TestServer" --interval 2 >> "${LOG_FILE}" 2>&1
+    if [ -z "${START_COMMAND}" ]; then
+        echo -e "${RED}Error: START_COMMAND is not defined${NC}"
+        echo "Example:"
+        echo "  export START_COMMAND=\"python3 /path/to/your/server.py\""
+        echo "  Or: $0 start --command \"python3 /path/to/your/server.py\""
+        exit 1
+    fi
+
+    ${START_COMMAND} >> "${LOG_FILE}" 2>&1
 }
 
 get_log_file() {
-    local year_month
-    year_month=$(date +%Y%m)
-    LOG_FILE="${LOG_DIR}/server_${year_month}.log"
+    LOG_FILE="${LOG_DIR}/server.log"
+    if [ -f "${LOG_FILE}" ]; then
+        rm -f "${LOG_FILE}.bak.${LOG_MAX_BACKUPS}"
+        for i in $(seq $((LOG_MAX_BACKUPS - 1)) -1 1); do
+            [ -f "${LOG_FILE}.bak.${i}" ] && mv "${LOG_FILE}.bak.${i}" "${LOG_FILE}.bak.$((i+1))"
+        done
+        mv "${LOG_FILE}" "${LOG_FILE}.bak.1"
+    fi
 }
 
 create_log_dir() {
@@ -73,6 +90,10 @@ do_start() {
         exit 1
     fi
     
+    if [ -n "${BEFORE_COMMAND}" ]; then
+        eval "${BEFORE_COMMAND}" >> "${LOG_FILE}" 2>&1
+    fi
+    
     start_func &
     local child_pid=$!
     
@@ -81,6 +102,10 @@ do_start() {
     if ! kill -0 "${child_pid}" 2>/dev/null; then
         echo -e "${RED}Error: Failed to start server${NC}"
         exit 1
+    fi
+    
+    if [ -n "${AFTER_COMMAND}" ]; then
+        eval "${AFTER_COMMAND}" >> "${LOG_FILE}" 2>&1
     fi
     
     echo "${child_pid}" > "${PID_FILE}"
@@ -204,14 +229,14 @@ do_clean() {
     fi
     
     local count
-    count=$(find "${LOG_DIR}" -maxdepth 1 -name "server_*.log" -type f | wc -l)
+    count=$(find "${LOG_DIR}" -maxdepth 1 -name "server*.log" -type f | wc -l)
     
     if [ ${count} -eq 0 ]; then
         echo "No log files to clean"
         exit 0
     fi
     
-    rm -f "${LOG_DIR}"/server_*.log
+    rm -f "${LOG_DIR}"/server*.log
     echo "Cleaned ${count} log file(s)"
 }
 
@@ -223,15 +248,43 @@ show_usage() {
     echo "  stop     - Gracefully stop the server (SIGTERM)"
     echo "  shutdown - Forcefully stop the server (SIGKILL)"
     echo "  status   - Show server status"
-    echo "  log      - View server log (supports -n NUM and -f)"
+    echo "  logs     - View server logs (supports -n NUM and -f)"
     echo "  restart  - Restart the server"
     echo "  clean    - Clean all log files"
     echo ""
-    echo "Note: Define start_func() function before calling this script"
+    echo "Start options:"
+    echo "  -c, --command CMD   Set the command to start the server"
+    echo "  -b, --before CMD    Set command to run before starting server"
+    echo "  -a, --after CMD     Set command to run after starting server"
+    echo ""
+    echo "Note: Environment variables (START_COMMAND, BEFORE_COMMAND, AFTER_COMMAND)"
+    echo "      have higher priority than command line options."
 }
 
 case "$1" in
     start)
+        shift
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -c|--command)
+                    START_COMMAND="$2"
+                    shift 2
+                    ;;
+                -b|--before)
+                    BEFORE_COMMAND="$2"
+                    shift 2
+                    ;;
+                -a|--after)
+                    AFTER_COMMAND="$2"
+                    shift 2
+                    ;;
+                *)
+                    echo -e "${RED}Unknown option: $1${NC}"
+                    show_usage
+                    exit 1
+                    ;;
+            esac
+        done
         do_start
         ;;
     stop)
@@ -243,7 +296,7 @@ case "$1" in
     status)
         do_status
         ;;
-    log)
+    logs)
         shift
         do_log "$@"
         ;;

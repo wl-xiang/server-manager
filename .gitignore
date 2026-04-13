@@ -1,4 +1,2 @@
 logs/
 *.pid
-test/logs/
-test/*.pid
