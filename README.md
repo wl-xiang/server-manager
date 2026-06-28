@@ -49,6 +49,10 @@ cp .env.example .env
   --before "echo 'Starting server...'" \
   --after "echo 'Server started'"
 
+# 重启服务（start 与 restart 均支持 --command / --before / --after）
+./server restart
+./server restart --command "python3 test_server.py"
+
 # 查看状态
 ./server status
 
@@ -77,10 +81,12 @@ cp .env.example .env
 | `shutdown` | 强制停止服务 (SIGKILL) |
 | `status` | 查看服务运行状态 |
 | `logs` | 查看日志，支持 `-n NUM` 指定行数与 `-f` 实时跟踪 |
-| `restart` | 重启服务（未运行时直接启动） |
+| `restart` | 重启服务；未运行时直接启动，支持 `start` 同款选项 |
 | `clean` | 清理全部日志文件（服务运行时禁止清理） |
 
-### start 选项
+### start / restart 选项
+
+`start` 与 `restart` 命令均支持以下选项：
 
 | 选项 | 说明 |
 |------|------|
@@ -125,6 +131,7 @@ LOG_MAX_BACKUPS=5
 ```bash
 # 命令行参数
 ./server start --command "python3 test_server.py"
+./server restart --command "python3 test_server.py"
 
 # 环境变量
 export START_COMMAND="python3 test_server.py"

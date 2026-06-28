@@ -10,7 +10,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Load KEY=VALUE entries from a .env file and export them literally.
 # Empty lines and comment lines (starting with '#') are skipped. A single
 # pair of surrounding single or double quotes around the value is stripped.
-# Values are treated as literal text (no shell expansion).
+# Leading/trailing whitespace is trimmed. Values are treated as literal text
+# (no shell expansion).
 load_env() {
     _env_file="$1"
     _dq='"'
@@ -26,6 +27,12 @@ load_env() {
         esac
         _key="${_line%%=*}"
         _val="${_line#*=}"
+        # Trim leading whitespace from key/value.
+        _key="${_key#"${_key%%[! ]*}"}"
+        _val="${_val#"${_val%%[! ]*}"}"
+        # Trim trailing whitespace from key/value.
+        _key="${_key%"${_key##*[! ]}"}"
+        _val="${_val%"${_val##*[! ]}"}"
         case "${_val}" in
             "${_dq}"*"${_dq}") _val="${_val#${_dq}}"; _val="${_val%${_dq}}" ;;
             "${_sq}"*"${_sq}") _val="${_val#${_sq}}"; _val="${_val%${_sq}}" ;;
@@ -53,6 +60,7 @@ esac
 LOG_FILE_NAME="${LOG_FILE_NAME:-server.log}"
 LOG_MAX_BACKUPS="${LOG_MAX_BACKUPS:-2}"
 PID_FILE="${SCRIPT_DIR}/server.pid"
+LOCK_FILE="${SCRIPT_DIR}/.server.lock"
 LOG_FILE="${LOG_DIR}/${LOG_FILE_NAME}"
 
 # Capture environment values (highest priority, may come from .env or shell).
@@ -64,6 +72,19 @@ ENV_AFTER_COMMAND="${AFTER_COMMAND:-}"
 CLI_START_COMMAND=""
 CLI_BEFORE_COMMAND=""
 CLI_AFTER_COMMAND=""
+
+# Parse start/restart command line options into the CLI_* placeholders.
+# Consumes arguments and leaves none; use after a 'shift'.
+parse_start_options() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -c|--command) CLI_START_COMMAND="$2";  shift 2 ;;
+            -b|--before)  CLI_BEFORE_COMMAND="$2"; shift 2 ;;
+            -a|--after)   CLI_AFTER_COMMAND="$2";  shift 2 ;;
+            *) print_error "Unknown option: $1"; show_usage; exit 1 ;;
+        esac
+    done
+}
 
 # ------------------------------------------------------------------------------
 # Output helpers: unified English text, portable printf-based coloring.
@@ -111,6 +132,30 @@ get_pid() {
     [ -f "${PID_FILE}" ] && cat "${PID_FILE}" 2>/dev/null
 }
 
+# Acquire the start lock atomically. Returns 0 on success, 1 if another
+# instance already holds the lock or a server is already running.
+# The lock file is created first; if a server is already running we
+# release it and back off. This prevents the TOCTOU race where two
+# invocations pass the pid check before either creates the lock.
+acquire_start_lock() {
+    # Atomic create using noclobber. If this fails, another start is in
+    # progress (or a stale lock exists from a crashed previous start).
+    if ! ( set -C; : > "${LOCK_FILE}" ) 2>/dev/null; then
+        return 1
+    fi
+    # Now that we hold the lock, verify no server is actually running.
+    if check_pid; then
+        release_start_lock
+        return 1
+    fi
+    return 0
+}
+
+# Release the start lock.
+release_start_lock() {
+    rm -f "${LOCK_FILE}"
+}
+
 # Rotate log files, keeping at most LOG_MAX_BACKUPS backups.
 rotate_log() {
     [ -f "${LOG_FILE}" ] || return 0
@@ -143,12 +188,12 @@ do_start() {
         print_info "Example:"
         print_info "  export START_COMMAND=\"python3 /path/to/your/server.py\""
         print_info "  Or: $0 start --command \"python3 /path/to/your/server.py\""
-        exit 1
+        return 1
     fi
 
-    if check_pid; then
-        print_error "Error: Server is already running with PID $(get_pid)"
-        exit 1
+    if ! acquire_start_lock; then
+        print_error "Error: Server is already running or another start is in progress"
+        return 1
     fi
 
     ensure_log_dir
@@ -158,30 +203,37 @@ do_start() {
     run_hook "${BEFORE_COMMAND}"
 
     # Detach from the controlling terminal so the process survives SSH
-    # disconnect: new session (setsid) + ignore SIGHUP (nohup) + redirected
-    # stdio. falls back to nohup alone where setsid is unavailable.
+    # disconnect. Wrap the command in "sh -c 'exec ...'" so that spaces and
+    # quotes inside START_COMMAND are preserved correctly, and use setsid to
+    # create a new session without a controlling terminal. The inner exec
+    # replaces the shell with the actual service so $! is the service PID.
+    # Falls back to nohup where setsid is unavailable.
     if command -v setsid >/dev/null 2>&1; then
-        setsid nohup ${START_COMMAND} >> "${LOG_FILE}" 2>&1 < /dev/null &
+        setsid sh -c "exec ${START_COMMAND}" >> "${LOG_FILE}" 2>&1 < /dev/null &
     else
-        nohup ${START_COMMAND} >> "${LOG_FILE}" 2>&1 < /dev/null &
+        nohup sh -c "exec ${START_COMMAND}" >> "${LOG_FILE}" 2>&1 < /dev/null &
     fi
     child_pid=$!
 
     sleep 1
     if ! kill -0 "${child_pid}" 2>/dev/null; then
+        release_start_lock
         print_error "Error: Failed to start server"
-        exit 1
+        return 1
     fi
 
     echo "${child_pid}" > "${PID_FILE}"
+    release_start_lock
 
     run_hook "${AFTER_COMMAND}"
 
     print_success "Server started successfully with PID ${child_pid}"
     print_info "Log file: ${LOG_FILE}"
+    return 0
 }
 
 # Stop the server with a given signal, polling up to max_wait seconds.
+# Returns 0 on success, 1 if the process did not stop in time.
 stop_server() {
     signal="$1"
     max_wait="$2"
@@ -189,7 +241,7 @@ stop_server() {
     if ! check_pid; then
         print_info "Server is not running"
         rm -f "${PID_FILE}" 2>/dev/null
-        exit 0
+        return 0
     fi
 
     pid="$(get_pid)"
@@ -211,7 +263,7 @@ stop_server() {
 
     if kill -0 "${pid}" 2>/dev/null; then
         print_warn "Warning: Server did not stop, still running"
-        exit 1
+        return 1
     fi
 
     rm -f "${PID_FILE}"
@@ -220,6 +272,7 @@ stop_server() {
     else
         print_success "Server forcefully stopped"
     fi
+    return 0
 }
 
 do_stop()     { stop_server TERM 30; }
@@ -264,7 +317,7 @@ do_log() {
 do_restart() {
     print_info "Restarting server..."
     if check_pid; then
-        do_stop
+        do_stop || return 1
         sleep 1
     else
         print_info "Server is not running"
@@ -308,10 +361,10 @@ Commands:
   shutdown Forcefully stop the server (SIGKILL)
   status   Show server status
   logs     View server logs (supports -n NUM and -f)
-  restart  Restart the server
+  restart  Restart the server (accepts the same options as start)
   clean    Clean all log files
 
-Start options:
+Start/Restart options:
   -c, --command CMD   Set the command to start the server
   -b, --before CMD    Set command to run before starting server
   -a, --after CMD     Set command to run after starting server
@@ -328,21 +381,18 @@ EOF
 case "$1" in
     start)
         shift
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                -c|--command) CLI_START_COMMAND="$2";  shift 2 ;;
-                -b|--before)  CLI_BEFORE_COMMAND="$2"; shift 2 ;;
-                -a|--after)   CLI_AFTER_COMMAND="$2";  shift 2 ;;
-                *) print_error "Unknown option: $1"; show_usage; exit 1 ;;
-            esac
-        done
-        do_start
+        parse_start_options "$@"
+        do_start || exit 1
         ;;
-    stop)     do_stop ;;
-    shutdown) do_shutdown ;;
+    stop)     do_stop || exit 1 ;;
+    shutdown) do_shutdown || exit 1 ;;
     status)   do_status ;;
     logs)     shift; do_log "$@" ;;
-    restart)  do_restart ;;
+    restart)
+        shift
+        parse_start_options "$@"
+        do_restart || exit 1
+        ;;
     clean)    do_clean ;;
     *)        show_usage; exit 1 ;;
 esac
