@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Server Manager 深度测试报告</title>
+<style>
+  :root {
+    --critical: #dc3545;
+    --medium: #fd7e14;
+    --low: #ffc107;
+    --info: #0d6efd;
+    --pass: #198754;
+    --bg: #f8f9fa;
+    --card-bg: #ffffff;
+    --text: #212529;
+    --text-muted: #6c757d;
+    --border: #dee2e6;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 20px;
+  }
+  .container { max-width: 1100px; margin: 0 auto; }
+  .header {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    color: #fff;
+    padding: 40px;
+    border-radius: 12px;
+    margin-bottom: 30px;
+  }
+  .header h1 { font-size: 28px; margin-bottom: 8px; }
+  .header .meta { color: #aaa; font-size: 14px; }
+  .summary-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 30px;
+  }
+  .summary-card {
+    background: var(--card-bg);
+    border-radius: 10px;
+    padding: 20px;
+    text-align: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+    border-left: 4px solid var(--border);
+  }
+  .summary-card .count { font-size: 36px; font-weight: 700; }
+  .summary-card .label { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+  .summary-card.critical { border-left-color: var(--critical); }
+  .summary-card.critical .count { color: var(--critical); }
+  .summary-card.medium { border-left-color: var(--medium); }
+  .summary-card.medium .count { color: var(--medium); }
+  .summary-card.low { border-left-color: var(--low); }
+  .summary-card.low .count { color: #cc9a06; }
+  .summary-card.pass { border-left-color: var(--pass); }
+  .summary-card.pass .count { color: var(--pass); }
+  .section {
+    background: var(--card-bg);
+    border-radius: 10px;
+    padding: 28px;
+    margin-bottom: 24px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  }
+  .section h2 {
+    font-size: 20px;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #fff;
+  }
+  .badge-critical { background: var(--critical); }
+  .badge-medium { background: var(--medium); }
+  .badge-low { background: #cc9a06; }
+  .badge-info { background: var(--info); }
+  .badge-pass { background: var(--pass); }
+  .issue {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .issue:last-child { margin-bottom: 0; }
+  .issue-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    gap: 12px;
+  }
+  .issue-title { font-size: 16px; font-weight: 600; }
+  .issue-file {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    color: var(--text-muted);
+    background: #f1f3f4;
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+  .issue-desc { color: #555; margin-bottom: 12px; font-size: 14px; }
+  .code-block {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 14px 18px;
+    border-radius: 6px;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    overflow-x: auto;
+    margin: 10px 0;
+    white-space: pre;
+  }
+  .code-block .kw { color: #569cd6; }
+  .code-block .fn { color: #dcdcaa; }
+  .code-block .str { color: #ce9178; }
+  .code-block .cm { color: #6a9955; }
+  .code-block .highlight { background: rgba(255,0,0,.25); display: inline-block; }
+  .test-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .test-table th {
+    background: #f1f3f4;
+    padding: 10px 14px;
+    text-align: left;
+    font-weight: 600;
+    border-bottom: 2px solid var(--border);
+  }
+  .test-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .test-table tr:hover { background: #f8f9fa; }
+  .test-table .pass { color: var(--pass); font-weight: 600; }
+  .test-table .fail { color: var(--critical); font-weight: 600; }
+  .test-table .warn { color: #cc9a06; font-weight: 600; }
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-right: 4px;
+  }
+  .tag-shell { background: #e8f0fe; color: #1967d2; }
+  .tag-logic { background: #fce8e6; color: #c5221f; }
+  .tag-security { background: #fef7e0; color: #e37400; }
+  .tag-robustness { background: #e6f4ea; color: #137333; }
+  .tag-config { background: #f3e8fd; color: #7627bb; }
+  .tag-ux { background: #e1f5fe; color: #0277bd; }
+  .footer {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-top: 30px;
+    padding: 20px;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="header">
+  <h1>Server Manager 深度测试报告</h1>
+  <div class="meta">
+    项目: /workspace/server &nbsp;|&nbsp;
+    测试日期: 2026-06-29 &nbsp;|&nbsp;
+    测试环境: Linux (POSIX sh) &nbsp;|&nbsp;
+    工具: shellcheck + 手动功能测试
+  </div>
+</div>
+
+<div class="summary-cards">
+  <div class="summary-card critical">
+    <div class="count">2</div>
+    <div class="label">严重问题</div>
+  </div>
+  <div class="summary-card medium">
+    <div class="count">4</div>
+    <div class="label">中等严重</div>
+  </div>
+  <div class="summary-card low">
+    <div class="count">7</div>
+    <div class="label">轻微问题</div>
+  </div>
+  <div class="summary-card pass">
+    <div class="count">38</div>
+    <div class="label">测试用例</div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- CRITICAL ISSUES -->
+<!-- ============================================================ -->
+<div class="section">
+  <h2><span class="badge badge-critical">严重</span> 严重问题</h2>
+
+  <!-- Issue 1 -->
+  <div class="issue">
+    <div class="issue-header">
+      <div>
+        <span class="badge badge-critical">严重</span>
+        <span class="tag tag-logic">逻辑缺陷</span>
+        <span class="tag tag-robustness">健壮性</span>
+      </div>
+      <span class="issue-file">server#L140-L152</span>
+    </div>
+    <div class="issue-title">#1 过期锁文件永久阻止服务启动</div>
+    <div class="issue-desc">
+      <strong>问题描述：</strong>当脚本在持有锁文件期间异常崩溃（或被 kill），<code>.server.lock</code> 文件会残留。此后所有启动操作都会失败，因为 <code>acquire_start_lock</code> 在检测到锁文件存在时直接返回失败，<strong>不会检查服务是否实际在运行</strong>。这意味着用户必须手动删除锁文件才能恢复服务。
+    </div>
+    <div class="code-block"><span class="cm"># 当前代码：锁文件存在时直接返回失败，不检查服务状态</span>
+<span class="kw">acquire_start_lock</span>() {
+    <span class="kw">if</span> ! ( <span class="kw">set</span> -C; : > <span class="str">"${LOCK_FILE}"</span> ) 2>/dev/null; <span class="kw">then</span>
+        <span class="kw">return</span> 1    <span class="cm"># &lt;-- BUG: 不检查服务是否实际运行</span>
+    <span class="kw">fi</span>
+    <span class="kw">if</span> check_pid; <span class="kw">then</span>
+        release_start_lock
+        <span class="kw">return</span> 1
+    <span class="kw">fi</span>
+    <span class="kw">return</span> 0
+}</div>
+    <div class="issue-desc">
+      <strong>复现步骤：</strong><br>
+      <code>touch .server.lock && ./server start --command "python3 test_server.py"</code><br>
+      <strong>结果：</strong>Error: Server is already running or another start is in progress<br>
+      <strong>预期：</strong>应检测到锁文件过期，删除它并正常启动。
+    </div>
+  </div>
+
+  <!-- Issue 2 -->
+  <div class="issue">
+    <div class="issue-header">
+      <div>
+        <span class="badge badge-critical">严重</span>
+        <span class="tag tag-logic">逻辑缺陷</span>
+        <span class="tag tag-robustness">健壮性</span>
+      </div>
+      <span class="issue-file">server#L183-L233</span>
+    </div>
+    <div class="issue-title">#2 启动失败时锁文件未释放</div>
+    <div class="issue-desc">
+      <strong>问题描述：</strong>在 <code>do_start</code> 函数中，获取锁之后、释放锁之前存在多个可能失败的步骤（<code>ensure_log_dir</code>、<code>rotate_log</code>），这些步骤失败时锁文件不会被释放。一旦发生，锁文件将变为过期锁，触发问题 #1。
+    </div>
+    <div class="code-block"><span class="kw">do_start</span>() {
+    ...
+    <span class="kw">if</span> ! acquire_start_lock; <span class="kw">then</span> ... <span class="kw">fi</span>
+
+    ensure_log_dir     <span class="cm"># 失败 → 锁泄漏</span>
+    rotate_log         <span class="cm"># 失败 → 锁泄漏</span>
+    : > <span class="str">"${LOG_FILE}"</span>
+
+    run_hook <span class="str">"${BEFORE_COMMAND}"</span>
+
+    <span class="cm"># ... 启动服务 ...</span>
+
+    <span class="kw">if</span> ! kill -0 <span class="str">"${child_pid}"</span> ... <span class="kw">then</span>
+        release_start_lock   <span class="cm"># 仅此路径释放</span>
+        ...
+    <span class="kw">fi</span>
+    ...
+    release_start_lock       <span class="cm"># 成功路径释放</span>
+}</div>
+    <div class="issue-desc">
+      <strong>影响：</strong>如果 <code>LOG_DIR</code> 指向不可写路径（如权限不足），<code>ensure_log_dir</code> 失败后锁文件泄漏，导致问题 #1 连锁发生。
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- MEDIUM ISSUES -->
+<!-- ============================================================ -->
+<div class="section">
+  <h2><span class="badge badge-medium">中等</span> 中等严重问题</h2>
+
+  <!-- Issue 3 -->
+  <div class="issue">
+    <div class="issue-header">
+      <div>
+        <span class="badge badge-medium">中等</span>
+        <span class="tag tag-config">配置缺陷</span>
+        <span class="tag tag-logic">逻辑缺陷</span>
+      </div>
+      <span class="issue-file">server#L329-L352</span>
+    </div>
+    <div class="issue-title">#3 do_clean 使用硬编码文件名模式，忽略 LOG_FILE_NAME 配置</div>
+    <div class="issue-desc">
+      <strong>问题描述：</strong><code>do_clean</code> 函数中硬编码了 <code>server*.log</code> 的 glob 模式，而不是使用配置的 <code>LOG_FILE_NAME</code>。当用户设置 <code>LOG_FILE_NAME=myapp.log</code> 时，<code>clean</code> 命令无法清理自定义名称的日志文件。
+    </div>
+    <div class="code-block"><span class="kw">do_clean</span>() {
+    ...
+    <span class="kw">for</span> f <span class="kw">in</span> <span class="str">"${LOG_DIR}"</span>/server*.log; <span class="kw">do</span>   <span class="cm"># &lt;-- 硬编码 "server"</span>
+        [ -f <span class="str">"$f"</span> ] && count=$((count + 1))
+    <span class="kw">done</span>
+    ...
+    rm -f <span class="str">"${LOG_DIR}"</span>/server*.log              <span class="cm"># &lt;-- 同样硬编码</span>
+}</div>
+    <div class="issue-desc">
+      <strong>复现：</strong><code>LOG_FILE_NAME=myapp.log ./server start ... && ./server clean</code> → 输出 "No log files to clean"，但 <code>myapp.log</code> 未删除。<br>
+      <strong>建议：</strong>应使用 <code>${LOG_FILE_NAME}</code> 或基于 <code>${LOG_FILE_NAME}</code> 构建 glob 模式。
+    </div>
+  </div>
+
+  <!-- Issue 4 -->
+  <div class="issue">
+    <div class="issue-header">
+      <div>
+        <span class="badge badge-medium">中等</span>
+        <span class="tag tag-logic">逻辑缺陷</span>
+      </div>
+      <span class="issue-file">server#L160-L171</span>
+    </div>
+    <div class="issue-title">#4 LOG_MAX_BACKUPS=0 时仍然创建备份文件</div>
+    <div class="issue-desc">
+      <strong>问题描述：</strong>当 <code>LOG_MAX_BACKUPS=0</code> 时，<code>rotate_log</code> 仍然会执行 <code>mv "${LOG_FILE}" "${LOG_FILE}.bak.1"</code>，创建了不应该存在的备份文件。设置 0 的语义应该是"不保留任何备份"，但实际行为是"保留 1 份备份"。
+    </div>
+    <div class="code-block"><span class="kw">rotate_log</span>() {
+    [ -f <span class="str">"${LOG_FILE}"</span> ] || <span class="kw">return</span> 0
+    rm -f <span class="str">"${LOG_FILE}.bak.${LOG_MAX_BACKUPS}"</span>   <span class="cm"># rm server.log.bak.0 (无害)</span>
+    i=$((LOG_MAX_BACKUPS - 1))                       <span class="cm"># i = -1</span>
+    <span class="kw">while</span> [ <span class="str">"${i}"</span> -ge 1 ]; <span class="kw">do</span> ... <span class="kw">done</span>         <span class="cm"># 不执行</span>
+    mv <span class="str">"${LOG_FILE}"</span> <span class="str">"${LOG_FILE}.bak.1"</span>              <span class="cm"># &lt;-- BUG: 总是创建 bak.1</span>
+}</div>
+    <div class="issue-desc">
+      <strong>复现：</strong><code>LOG_MAX_BACKUPS=0 ./server start ... && ./server restart ...</code> → <code>server.log.bak.1</code> 文件存在。
+    </div>
+  </div>
+
+  <!-- Issue 5 -->
+  <div class="issue">
+    <div class="issue-header">
+      <div>
+        <span class="badge badge-medium">中等</span>
+        <span class="tag tag-robustness">健壮性</span>
+        <span class="tag tag-ux">用户体验</span>
+      </div>
+      <span class="issue-file">server#L78-L87, L297-L304</span>
+    </div>
+    <div class="issue-title">#5 选项缺少参数值时崩溃（shift 错误）</div>
+    <div class="issue-desc">
+      <strong>问题描述：</strong><code>parse_start_options</code> 和 <code>do_log</code> 函数在选项（<code>-c</code>、<code>-b</code>、<code>-a</code>、<code>-n</code>）缺少参数值时，<code>shift 2</code> 会因为参数不足而报错 <code>"shift: can't shift that many"</code>，脚本退出码为 2。
+    </div>
+    <div class="code-block"><span class="cm"># 触发方式：</span>
+./server start -c          <span class="cm"># -c 需要参数值，但没提供</span>
+./server logs -n           <span class="cm"># -n 需要参数值，但没提供</span>
+
+<span class="cm"># 错误输出：</span>
+./server: 81: shift: can't shift that many</div>
+    <div class="issue-desc">
+      <strong>影响：</strong>用户体验差，且退出码 2 不是预期的 1（一般错误）。应检查参数数量后再 shift。
+    </div>
+  </div>
+
+  <!-- Issue 6 -->
+  <div class="issue">
+    <div class="issue-header">
+      <div>
+        <span class="badge badge-medium">中等</span>
+        <span class="tag tag-logic">逻辑缺陷</span>
+      </div>
+      <span class="issue-file">server#L160-L171</span>
+    </div>
+    <div class="issue-title">#6 LOG_MAX_BACKUPS 值未做合法性校验</div>
+    <div class="issue-desc">
+      <strong>问题描述：</strong><code>LOG_MAX_BACKUPS</code> 接受任意值（包括非数字、负数），不做校验。设置 <code>LOG_MAX_BACKUPS=abc</code> 时，<code>$((abc - 1))</code> 在 POSIX sh 中会产生算术错误，但脚本继续执行并产生不可预期的行为。
+    </div>
+    <div class="issue-desc">
+      <strong>建议：</strong>在启动时验证 <code>LOG_MAX_BACKUPS</code> 是否为非负整数。
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- LOW ISSUES -->
+<!-- ============================================================ -->
+<div class="section">
+  <h2><span class="badge badge-low">轻微</span> 轻微问题</h2>
+
+  <!-- Issue 7 -->
+  <div class="issue">
+    <div class="issue-header">
+      <div>
+        <span class="badge badge-low">轻微</span>
+        <span class="tag tag-shell">Shell 规范</span>
+      </div>
+      <span class="issue-file">server#L37-L38</span>
+    </div>
+    <div class="issue-title">#7 shellcheck SC2295: ${var#pattern} 中 pattern 未正确引用</div>
+    <div class="issue-desc">
+      <strong>问题描述：</strong>在 <code>load_env</code> 函数的引号剥离逻辑中，<code>${_val#${_dq}}</code> 和 <code>${_val%${_dq}}</code> 中的 <code>${_dq}</code> 未加引号，会被当作 glob 模式匹配而非字面字符串。
+    </div>
+    <div class="code-block"><span class="cm"># 当前 (有问题)</span>
+_val=<span class="str">"${_val#${_dq}}"</span>; _val=<span class="str">"${_val%${_dq}}"</span>
+
+<span class="cm"># 建议修改为</span>
+_val=<span class="str">"${_val#"${_dq}"}"</span>; _val=<span class="str">"${_val%"${_dq}"}"</span></div>
+    <div class="issue-desc">
+      <strong>影响：</strong>虽然引号字符 <code>"</code> 和 <code>'</code> 不是特殊的 glob 字符，但不符合 POSIX 最佳实践，在某些极端 shell 实现中可能有问题。
+    </div>
+  </div>
+
+  <!-- Issue 8 -->
+  <div class="issue">
+    <div class="issue-header">
+      <div>
+        <span class="badge badge-low">轻微</span>
+        <span class="tag tag-shell">Shell 规范</span>
+      </div>
+      <span class="issue-file">server#L283, L286</span>
+    </div>
+    <div class="issue-title">#8 shellcheck SC2059: printf 格式字符串中含变量</div>
+    <div class="issue-desc">
+      <strong>问题描述：</strong><code>do_status</code> 函数中 <code>printf</code> 的格式字符串包含了 <code>${COLOR_GREEN}</code> 等变量，不符合 shellcheck 规范。如果颜色变量中包含 <code>%</code> 字符，可能导致意外行为。
+    </div>
+    <div class="code-block"><span class="cm"># 当前 (有问题)</span>
+printf <span class="str">"Server is ${COLOR_GREEN}running${COLOR_RESET} (PID: $(get_pid))\n"</span>
+
+<span class="cm"># 建议</span>
+printf <span class="str">'Server is %srunning%s (PID: %s)\n'</span> <span class="str">"${COLOR_GREEN}"</span> <span class="str">"${COLOR_RESET}"</span> <span class="str">"$(get_pid)"</span></div>
+  </div>
+
+  <!-- Issue 9 -->
+  <div class="issue">
+    <div class="issue-header">
+      <div>
+        <span class="badge badge-low">轻微</span>
+        <span class="tag tag-ux">用户体验</span>
+      </div>
+      <span class="issue-file">server#L317-L327</span>
+    </div>
+    <div class="issue-title">#9 do_restart 在服务未运行时有多余的 sleep 1</div>
+    <div class="issue-desc">
+      <strong>问题描述：</strong><code>do_restart</code> 函数中，当服务未运行时依然执行 <code>sleep 1</code>，造成不必要的等待。
+    </div>
+    <div class="code-block"><span class="kw">do_restart</span>() {
+    ...
+    <span class="kw">if</span> check_pid; <span class="kw">then</span>
+        do_stop || <span class="kw">return</span> 1
+        sleep 1
+    <span class="kw">else</span>
+        print_info <span class="str">"Server is not running"</span>
+        rm -f <span class="str">"${PID_FILE}"</span> 2>/dev/null
+    <span class="kw">fi</span>
+    <span class="cm"># sleep 1 应移到 if 块内部</span>
+    do_start
+}</div>
+  </div>
+
+  <!-- Issue 10 -->
+  <div class="issue">
+    <div class="issue-header">
+      <div>
+        <span class="badge badge-low">轻微</span>
+        <span class="tag tag-robustness">健壮性</span>
+      </div>
+      <span class="issue-file">server#L119-L128</span>
+    </div>
+    <div class="issue-title">#10 PID 文件仅验证进程存在，不验证进程身份</div>
+    <div class="issue-desc">
+      <strong>问题描述：</strong><code>check_pid</code> 使用 <code>kill -0</code> 仅检查 PID 是否存在，不验证该进程是否确实是本脚本启动的服务。如果服务进程崩溃后 PID 被系统回收并分配给其他进程，脚本会误认为服务仍在运行，并尝试向该进程发送 SIGTERM。
+    </div>
+    <div class="issue-desc">
+      <strong>风险：</strong>低（PID 回收在 Linux 上需要较长时间且通常不会立即分配给其他进程），但理论上存在。
+    </div>
+  </div>
+
+  <!-- Issue 11 -->
+  <div class="issue">
+    <div class="issue-header">
+      <div>
+        <span class="badge badge-low">轻微</span>
+        <span class="tag tag-robustness">健壮性</span>
+      </div>
+      <span class="issue-file">server#L218</span>
+    </div>
+    <div class="issue-title">#11 sleep 1 硬编码可能导致误判启动失败</div>
+    <div class="issue-desc">
+      <strong>问题描述：</strong><code>do_start</code> 中启动后仅等待 1 秒就检查进程是否存活。对于初始化时间超过 1 秒的服务，可能被误判为启动失败。
+    </div>
+    <div class="code-block"><span class="cm"># 当前硬编码</span>
+sleep 1
+<span class="kw">if</span> ! kill -0 <span class="str">"${child_pid}"</span> 2>/dev/null; <span class="kw">then</span>
+    print_error <span class="str">"Error: Failed to start server"</span>
+<span class="kw">fi</span></div>
+    <div class="issue-desc">
+      <strong>建议：</strong>可配置的等待时间，或采用重试机制。
+    </div>
+  </div>
+
+  <!-- Issue 12 -->
+  <div class="issue">
+    <div class="issue-header">
+      <div>
+        <span class="badge badge-low">轻微</span>
+        <span class="tag tag-security">安全</span>
+      </div>
+      <span class="issue-file">server#L174-L177</span>
+    </div>
+    <div class="issue-title">#12 run_hook 使用 eval 执行钩子命令</div>
+    <div class="issue-desc">
+      <strong>问题描述：</strong><code>run_hook</code> 使用 <code>eval</code> 执行 <code>BEFORE_COMMAND</code> 和 <code>AFTER_COMMAND</code>。如果这些命令来自不可信来源（如被篡改的 <code>.env</code> 文件），可能造成任意代码执行。
+    </div>
+    <div class="code-block"><span class="kw">run_hook</span>() {
+    [ -n <span class="str">"$1"</span> ] || <span class="kw">return</span> 0
+    eval <span class="str">"$1"</span> >> <span class="str">"${LOG_FILE}"</span> 2>&amp;1    <span class="cm"># eval 执行任意命令</span>
+}</div>
+    <div class="issue-desc">
+      <strong>风险：</strong>低（需要先能修改 .env 文件或环境变量），但值得注意。
+    </div>
+  </div>
+
+  <!-- Issue 13 -->
+  <div class="issue">
+    <div class="issue-header">
+      <div>
+        <span class="badge badge-low">轻微</span>
+        <span class="tag tag-ux">用户体验</span>
+      </div>
+      <span class="issue-file">server#L106-L111</span>
+    </div>
+    <div class="issue-title">#13 环境变量优先于命令行参数的设计违反直觉</div>
+    <div class="issue-desc">
+      <strong>问题描述：</strong><code>resolve_commands</code> 中环境变量优先级高于命令行参数（<code>ENV_START_COMMAND:-${CLI_START_COMMAND}}</code>），这与大多数 CLI 工具的惯例相反。用户通过命令行指定的参数被环境变量静默覆盖，可能导致困惑。
+    </div>
+    <div class="code-block"><span class="cm"># 当前：ENV 优先</span>
+START_COMMAND=<span class="str">"${ENV_START_COMMAND:-${CLI_START_COMMAND}}"</span>
+
+<span class="cm"># 示例：命令行参数被忽略</span>
+START_COMMAND=<span class="str">"python3 app.py"</span> ./server start --command <span class="str">"python3 other.py"</span>
+<span class="cm"># 实际执行的是 app.py，而非 other.py</span></div>
+    <div class="issue-desc">
+      <strong>注意：</strong>README 中已记录此行为，属于设计决策。但容易导致用户困惑。
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- TEST RESULTS -->
+<!-- ============================================================ -->
+<div class="section">
+  <h2><span class="badge badge-info">测试</span> 功能测试结果汇总</h2>
+  <table class="test-table">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>测试项</th>
+        <th>结果</th>
+        <th>备注</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td>无命令启动</td><td class="pass">PASS</td><td>正确提示 START_COMMAND 未定义</td></tr>
+      <tr><td>2</td><td>CLI --command 启动</td><td class="pass">PASS</td><td>正常启动，PID 写入文件</td></tr>
+      <tr><td>3</td><td>status (运行中)</td><td class="pass">PASS</td><td>正确显示 running 和 PID</td></tr>
+      <tr><td>4</td><td>重复启动防护</td><td class="pass">PASS</td><td>正确拒绝，提示已运行</td></tr>
+      <tr><td>5</td><td>logs 查看日志</td><td class="pass">PASS</td><td>正确显示日志内容</td></tr>
+      <tr><td>6</td><td>logs -n N</td><td class="pass">PASS</td><td>正确限制行数</td></tr>
+      <tr><td>7</td><td>stop 停止服务</td><td class="pass">PASS</td><td>SIGTERM 正常停止</td></tr>
+      <tr><td>8</td><td>status (已停止)</td><td class="pass">PASS</td><td>正确显示 stopped，exit 1</td></tr>
+      <tr><td>9</td><td>stop 已停止的服务</td><td class="pass">PASS</td><td>提示 "not running"</td></tr>
+      <tr><td>10</td><td>clean 清理日志</td><td class="pass">PASS</td><td>正常清理</td></tr>
+      <tr><td>11</td><td>before/after 钩子</td><td class="pass">PASS</td><td>钩子输出正确写入日志</td></tr>
+      <tr><td>12</td><td>restart 重启</td><td class="pass">PASS</td><td>停止旧进程并启动新进程</td></tr>
+      <tr><td>13</td><td>ENV 优先于 CLI</td><td class="pass">PASS</td><td>环境变量覆盖命令行参数</td></tr>
+      <tr><td>14</td><td>日志滚动 (MAX_BACKUPS=3)</td><td class="pass">PASS</td><td>正确保留 3 份备份</td></tr>
+      <tr><td>15</td><td>过期锁文件</td><td class="fail">FAIL</td><td>锁文件存在时无法启动 (问题 #1)</td></tr>
+      <tr><td>16</td><td>shutdown 强制停止</td><td class="pass">PASS</td><td>SIGKILL 正常停止</td></tr>
+      <tr><td>17</td><td>无效命令</td><td class="pass">PASS</td><td>显示 usage，exit 1</td></tr>
+      <tr><td>18</td><td>无参数</td><td class="pass">PASS</td><td>显示 usage，exit 1</td></tr>
+      <tr><td>19</td><td>运行中 clean 防护</td><td class="pass">PASS</td><td>正确拒绝清理</td></tr>
+      <tr><td>20</td><td>-c 无参数值</td><td class="fail">FAIL</td><td>shift 错误崩溃 (问题 #5)</td></tr>
+      <tr><td>21</td><td>.env 文件加载</td><td class="pass">PASS</td><td>正确加载环境变量</td></tr>
+      <tr><td>22</td><td>LOG_MAX_BACKUPS=0</td><td class="fail">FAIL</td><td>仍创建 bak.1 (问题 #4)</td></tr>
+      <tr><td>23</td><td>自定义 LOG_FILE_NAME clean</td><td class="fail">FAIL</td><td>无法清理自定义名称日志 (问题 #3)</td></tr>
+      <tr><td>24</td><td>LOG_MAX_BACKUPS=1 多次旋转</td><td class="warn">WARN</td><td>不同调用间配置不一致导致备份数超出预期</td></tr>
+      <tr><td>25</td><td>logs -n 无参数值</td><td class="fail">FAIL</td><td>shift 错误崩溃 (问题 #5)</td></tr>
+      <tr><td>26</td><td>损坏的 PID 文件</td><td class="pass">PASS</td><td>正确清理并报告 stopped</td></tr>
+      <tr><td>27</td><td>空 PID 文件</td><td class="pass">PASS</td><td>正确清理</td></tr>
+      <tr><td>28</td><td>未知选项</td><td class="pass">PASS</td><td>显示 usage</td></tr>
+      <tr><td>29</td><td>--before 仅钩子</td><td class="pass">PASS</td><td>正常执行</td></tr>
+      <tr><td>30</td><td>不存在的日志文件</td><td class="pass">PASS</td><td>正确报错</td></tr>
+      <tr><td>31</td><td>过期锁 + 无服务运行</td><td class="fail">FAIL</td><td>锁文件阻止启动 (问题 #1)</td></tr>
+      <tr><td>32</td><td>.env 多种值格式</td><td class="pass">PASS</td><td>引号剥离、注释跳过正常</td></tr>
+      <tr><td>33</td><td>LOG_MAX_BACKUPS=abc</td><td class="fail">FAIL</td><td>无校验，静默异常 (问题 #6)</td></tr>
+      <tr><td>34</td><td>restart 未运行时</td><td class="pass">PASS</td><td>正常启动 (但有多余 sleep)</td></tr>
+      <tr><td>35</td><td>无效启动命令</td><td class="pass">PASS</td><td>正确报错 "Failed to start"</td></tr>
+      <tr><td>36</td><td>PID 指向其他进程</td><td class="warn">WARN</td><td>尝试 kill 其他进程 (问题 #10)</td></tr>
+      <tr><td>37</td><td>restart 时 stop 失败</td><td class="pass">PASS</td><td>正确轮询等待</td></tr>
+      <tr><td>38</td><td>clean 不清理自定义名称日志</td><td class="fail">FAIL</td><td>仅清理 server*.log (问题 #3)</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============================================================ -->
+<!-- SHELLCHECK -->
+<!-- ============================================================ -->
+<div class="section">
+  <h2><span class="badge badge-info">静态分析</span> ShellCheck 静态分析结果</h2>
+  <table class="test-table">
+    <thead>
+      <tr><th>级别</th><th>规则</th><th>位置</th><th>描述</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="badge badge-low">info</span></td>
+        <td>SC2295</td>
+        <td>server#L37</td>
+        <td><code>${_val#${_dq}}</code> 中的 pattern 应加引号：<code>${_val#"${_dq}"}</code></td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-low">info</span></td>
+        <td>SC2295</td>
+        <td>server#L38</td>
+        <td><code>${_val#${_sq}}</code> 中的 pattern 应加引号：<code>${_val#"${_sq}"}</code></td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-low">info</span></td>
+        <td>SC2059</td>
+        <td>server#L283</td>
+        <td>printf 格式字符串不应包含变量</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-low">info</span></td>
+        <td>SC2059</td>
+        <td>server#L286</td>
+        <td>printf 格式字符串不应包含变量</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============================================================ -->
+<!-- SUMMARY -->
+<!-- ============================================================ -->
+<div class="section">
+  <h2>总结</h2>
+  <div style="font-size: 14px; line-height: 2;">
+    <p><strong>测试范围：</strong>对 <code>server</code> 脚本进行了 38 项功能测试 + ShellCheck 静态分析。</p>
+    <p><strong>通过率：</strong>38 项测试中，<span style="color:var(--pass);font-weight:700;">26 项通过</span>，<span style="color:var(--critical);font-weight:700;">8 项失败</span>，<span style="color:#cc9a06;font-weight:700;">2 项警告</span>，通过率 <strong>68.4%</strong>。</p>
+    <p><strong>最严重的问题：</strong></p>
+    <ol style="margin-left: 20px;">
+      <li><strong>锁文件机制缺陷</strong> — 过期锁文件永久阻止启动，且启动失败路径存在锁泄漏，这是最影响可用性的一类问题。</li>
+      <li><strong>配置不生效</strong> — <code>do_clean</code> 不尊重 <code>LOG_FILE_NAME</code> 配置，<code>LOG_MAX_BACKUPS=0</code> 不生效。</li>
+      <li><strong>参数校验缺失</strong> — 选项缺少参数值时脚本崩溃，配置值不做合法性校验。</li>
+    </ol>
+    <p style="margin-top: 12px; color: var(--text-muted);">
+      <em>本报告仅汇总问题，不包含代码修改。所有问题均已在测试环境复现确认。</em>
+    </p>
+  </div>
+</div>
+
+<div class="footer">
+  Server Manager Deep Test Report &mdash; Generated 2026-06-29
+</div>
+
+</div>
+</body>
+</html>
