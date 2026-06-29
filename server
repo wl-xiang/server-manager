@@ -34,8 +34,8 @@ load_env() {
         _key="${_key%"${_key##*[! ]}"}"
         _val="${_val%"${_val##*[! ]}"}"
         case "${_val}" in
-            "${_dq}"*"${_dq}") _val="${_val#${_dq}}"; _val="${_val%${_dq}}" ;;
-            "${_sq}"*"${_sq}") _val="${_val#${_sq}}"; _val="${_val%${_sq}}" ;;
+            "${_dq}"*"${_dq}") _val="${_val#"${_dq}"}"; _val="${_val%"${_dq}"}" ;;
+            "${_sq}"*"${_sq}") _val="${_val#"${_sq}"}"; _val="${_val%"${_sq}"}" ;;
         esac
         case "${_key}" in
             ''|*[!A-Za-z0-9_]*) continue ;;
@@ -59,11 +59,16 @@ esac
 
 LOG_FILE_NAME="${LOG_FILE_NAME:-server.log}"
 LOG_MAX_BACKUPS="${LOG_MAX_BACKUPS:-2}"
+# Seconds to wait for the service to initialize before considering it started.
+START_WAIT="${START_WAIT:-1}"
 PID_FILE="${SCRIPT_DIR}/server.pid"
 LOCK_FILE="${SCRIPT_DIR}/.server.lock"
 LOG_FILE="${LOG_DIR}/${LOG_FILE_NAME}"
 
 # Capture environment values (highest priority, may come from .env or shell).
+# DESIGN DECISION: Environment variables take precedence over command line
+# options. This allows .env to serve as a persistent override layer while
+# CLI options act as a fallback for ad-hoc invocations.
 ENV_START_COMMAND="${START_COMMAND:-}"
 ENV_BEFORE_COMMAND="${BEFORE_COMMAND:-}"
 ENV_AFTER_COMMAND="${AFTER_COMMAND:-}"
@@ -73,31 +78,36 @@ CLI_START_COMMAND=""
 CLI_BEFORE_COMMAND=""
 CLI_AFTER_COMMAND=""
 
-# Parse start/restart command line options into the CLI_* placeholders.
-# Consumes arguments and leaves none; use after a 'shift'.
-parse_start_options() {
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            -c|--command) CLI_START_COMMAND="$2";  shift 2 ;;
-            -b|--before)  CLI_BEFORE_COMMAND="$2"; shift 2 ;;
-            -a|--after)   CLI_AFTER_COMMAND="$2";  shift 2 ;;
-            *) print_error "Unknown option: $1"; show_usage; exit 1 ;;
-        esac
-    done
-}
-
 # ------------------------------------------------------------------------------
 # Output helpers: unified English text, portable printf-based coloring.
+# Escape codes are embedded directly in the printf format string so they are
+# interpreted by printf, while user text is passed as %s arguments to avoid
+# format string injection (shellcheck SC2059).
 # ------------------------------------------------------------------------------
-COLOR_RED='\033[0;31m'
-COLOR_GREEN='\033[0;32m'
-COLOR_YELLOW='\033[0;33m'
-COLOR_RESET='\033[0m'
-
 print_info()    { printf '%s\n' "$*"; }
-print_success() { printf "${COLOR_GREEN}%s${COLOR_RESET}\n" "$*"; }
-print_error()   { printf "${COLOR_RED}%s${COLOR_RESET}\n" "$*" >&2; }
-print_warn()    { printf "${COLOR_YELLOW}%s${COLOR_RESET}\n" "$*"; }
+print_success() { printf '\033[0;32m%s\033[0m\n' "$*"; }
+print_error()   { printf '\033[0;31m%s\033[0m\n' "$*" >&2; }
+print_warn()    { printf '\033[0;33m%s\033[0m\n' "$*"; }
+
+# ------------------------------------------------------------------------------
+# Configuration validation
+# ------------------------------------------------------------------------------
+
+# Validate numeric configuration values. Exits with an error message on failure.
+validate_config() {
+    case "${LOG_MAX_BACKUPS}" in
+        ''|*[!0-9]*)
+            print_error "Error: LOG_MAX_BACKUPS must be a non-negative integer, got: '${LOG_MAX_BACKUPS}'"
+            exit 1
+            ;;
+    esac
+    case "${START_WAIT}" in
+        ''|*[!0-9]*)
+            print_error "Error: START_WAIT must be a non-negative integer, got: '${START_WAIT}'"
+            exit 1
+            ;;
+    esac
+}
 
 # ------------------------------------------------------------------------------
 # Common helpers (shared logic, no duplication).
@@ -110,7 +120,7 @@ resolve_commands() {
     AFTER_COMMAND="${ENV_AFTER_COMMAND:-${CLI_AFTER_COMMAND}}"
 }
 
-# Ensure the log directory exists.
+# Ensure the log directory exists. Returns the exit status of mkdir.
 ensure_log_dir() {
     [ -d "${LOG_DIR}" ] || mkdir -p "${LOG_DIR}"
 }
@@ -120,6 +130,13 @@ check_pid() {
     [ -f "${PID_FILE}" ] || return 1
     pid="$(cat "${PID_FILE}" 2>/dev/null)"
     [ -n "${pid}" ] || { rm -f "${PID_FILE}"; return 1; }
+    # Validate pid is a positive integer to avoid passing garbage to kill.
+    case "${pid}" in
+        ''|*[!0-9]*) rm -f "${PID_FILE}"; return 1 ;;
+    esac
+    # Reject PID 0 and PID 1 (init/systemd) to prevent accidental signals
+    # to critical system processes in case of PID file corruption or recycling.
+    [ "${pid}" -le 1 ] 2>/dev/null && { rm -f "${PID_FILE}"; return 1; }
     if kill -0 "${pid}" 2>/dev/null; then
         return 0
     fi
@@ -134,14 +151,24 @@ get_pid() {
 
 # Acquire the start lock atomically. Returns 0 on success, 1 if another
 # instance already holds the lock or a server is already running.
-# The lock file is created first; if a server is already running we
-# release it and back off. This prevents the TOCTOU race where two
-# invocations pass the pid check before either creates the lock.
+# If a stale lock file exists (leftover from a crashed previous start) and
+# no server is running, the stale lock is removed and acquisition is retried.
 acquire_start_lock() {
-    # Atomic create using noclobber. If this fails, another start is in
-    # progress (or a stale lock exists from a crashed previous start).
-    if ! ( set -C; : > "${LOCK_FILE}" ) 2>/dev/null; then
-        return 1
+    # Attempt atomic creation using noclobber.
+    if ( set -C; : > "${LOCK_FILE}" ) 2>/dev/null; then
+        : # Lock acquired successfully.
+    else
+        # Lock file exists. Determine if it is stale by checking whether a
+        # server is actually running. If not, the lock is leftover from a
+        # crashed start and can be safely removed.
+        if check_pid; then
+            return 1  # Server is running; another start should not proceed.
+        fi
+        # Stale lock detected — remove it and retry acquisition.
+        rm -f "${LOCK_FILE}"
+        if ! ( set -C; : > "${LOCK_FILE}" ) 2>/dev/null; then
+            return 1  # Could not acquire (race or permission issue).
+        fi
     fi
     # Now that we hold the lock, verify no server is actually running.
     if check_pid; then
@@ -157,8 +184,15 @@ release_start_lock() {
 }
 
 # Rotate log files, keeping at most LOG_MAX_BACKUPS backups.
+# When LOG_MAX_BACKUPS is 0, the current log is deleted without creating
+# any backup files.
 rotate_log() {
     [ -f "${LOG_FILE}" ] || return 0
+    # If no backups should be kept, simply remove the old log.
+    if [ "${LOG_MAX_BACKUPS}" -eq 0 ] 2>/dev/null; then
+        rm -f "${LOG_FILE}"
+        return 0
+    fi
     rm -f "${LOG_FILE}.bak.${LOG_MAX_BACKUPS}"
     i=$((LOG_MAX_BACKUPS - 1))
     while [ "${i}" -ge 1 ]; do
@@ -171,9 +205,13 @@ rotate_log() {
 }
 
 # Run a hook command when non-empty, sending output to the log file.
+# The command is executed via "sh -c" in a subshell so that side effects
+# (variable assignment, cd, etc.) do not leak into the parent script.
+# NOTE: Hook commands support full shell syntax by design. Ensure .env and
+# the shell environment are trusted before defining hooks.
 run_hook() {
     [ -n "$1" ] || return 0
-    eval "$1" >> "${LOG_FILE}" 2>&1
+    sh -c "$1" >> "${LOG_FILE}" 2>&1
 }
 
 # ------------------------------------------------------------------------------
@@ -191,14 +229,29 @@ do_start() {
         return 1
     fi
 
+    validate_config
+
     if ! acquire_start_lock; then
         print_error "Error: Server is already running or another start is in progress"
         return 1
     fi
 
-    ensure_log_dir
+    # From this point, we hold the start lock. Every failure path below must
+    # call release_start_lock before returning.
+
+    if ! ensure_log_dir; then
+        release_start_lock
+        print_error "Error: Failed to create log directory: ${LOG_DIR}"
+        return 1
+    fi
+
     rotate_log
-    : > "${LOG_FILE}"
+
+    if ! ( : > "${LOG_FILE}" ); then
+        release_start_lock
+        print_error "Error: Failed to create log file: ${LOG_FILE}"
+        return 1
+    fi
 
     run_hook "${BEFORE_COMMAND}"
 
@@ -215,12 +268,19 @@ do_start() {
     fi
     child_pid=$!
 
-    sleep 1
-    if ! kill -0 "${child_pid}" 2>/dev/null; then
-        release_start_lock
-        print_error "Error: Failed to start server"
-        return 1
-    fi
+    # Wait for the service to initialize, polling every second. If the
+    # process exits during this window, report failure immediately rather
+    # than waiting the full START_WAIT period.
+    wait_count=0
+    while [ "${wait_count}" -lt "${START_WAIT}" ]; do
+        sleep 1
+        if ! kill -0 "${child_pid}" 2>/dev/null; then
+            release_start_lock
+            print_error "Error: Failed to start server"
+            return 1
+        fi
+        wait_count=$((wait_count + 1))
+    done
 
     echo "${child_pid}" > "${PID_FILE}"
     release_start_lock
@@ -280,10 +340,10 @@ do_shutdown() { stop_server KILL 1; }
 
 do_status() {
     if check_pid; then
-        printf "Server is ${COLOR_GREEN}running${COLOR_RESET} (PID: $(get_pid))\n"
+        printf 'Server is \033[0;32mrunning\033[0m (PID: %s)\n' "$(get_pid)"
         exit 0
     fi
-    printf "Server is ${COLOR_RED}stopped${COLOR_RESET}\n"
+    printf 'Server is \033[0;31mstopped\033[0m\n'
     exit 1
 }
 
@@ -297,7 +357,9 @@ do_log() {
     follow=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            -n) lines="$2"; shift 2 ;;
+            -n)
+                [ $# -ge 2 ] || { print_error "Error: -n requires an argument"; exit 1; }
+                lines="$2"; shift 2 ;;
             -f) follow="1"; shift ;;
             *)  shift ;;
         esac
@@ -318,6 +380,8 @@ do_restart() {
     print_info "Restarting server..."
     if check_pid; then
         do_stop || return 1
+        # Brief pause to allow the process to fully release resources (e.g.,
+        # listening sockets) before the new instance starts.
         sleep 1
     else
         print_info "Server is not running"
@@ -337,8 +401,13 @@ do_clean() {
         exit 0
     fi
 
+    # Build cleanup pattern from the configured LOG_FILE_NAME.
+    # Removes the main log file and all rotated backups (*.bak.N).
     count=0
-    for f in "${LOG_DIR}"/server*.log; do
+    if [ -f "${LOG_DIR}/${LOG_FILE_NAME}" ]; then
+        count=$((count + 1))
+    fi
+    for f in "${LOG_DIR}/${LOG_FILE_NAME}".bak.*; do
         [ -f "$f" ] && count=$((count + 1))
     done
 
@@ -347,8 +416,28 @@ do_clean() {
         exit 0
     fi
 
-    rm -f "${LOG_DIR}"/server*.log
+    rm -f "${LOG_DIR}/${LOG_FILE_NAME}"
+    rm -f "${LOG_DIR}/${LOG_FILE_NAME}".bak.*
     print_info "Cleaned ${count} log file(s)"
+}
+
+# Parse start/restart command line options into the CLI_* placeholders.
+# Consumes arguments and leaves none; use after a 'shift'.
+parse_start_options() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -c|--command)
+                [ $# -ge 2 ] || { print_error "Error: $1 requires an argument"; show_usage; exit 1; }
+                CLI_START_COMMAND="$2"; shift 2 ;;
+            -b|--before)
+                [ $# -ge 2 ] || { print_error "Error: $1 requires an argument"; show_usage; exit 1; }
+                CLI_BEFORE_COMMAND="$2"; shift 2 ;;
+            -a|--after)
+                [ $# -ge 2 ] || { print_error "Error: $1 requires an argument"; show_usage; exit 1; }
+                CLI_AFTER_COMMAND="$2"; shift 2 ;;
+            *) print_error "Unknown option: $1"; show_usage; exit 1 ;;
+        esac
+    done
 }
 
 show_usage() {
